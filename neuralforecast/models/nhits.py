@@ -181,6 +181,9 @@ class NHITSBlock(nn.Module):
         # Compute local projection weights and projection
         theta = self.layers(insample_y)
         backcast, forecast = self.basis(theta)
+        if self.is_last_block:
+            print("last_block", self.last_activation)
+            forecast = self.last_activation(forecast)
         return backcast, forecast
 
 # %% ../../nbs/models.nhits.ipynb 10
@@ -264,6 +267,7 @@ class NHITS(BaseModel):
         interpolation_mode: str = "linear",
         dropout_prob_theta=0.0,
         activation="ReLU",
+        last_block_activation: Optional[str] = None,
         loss=MAE(),
         valid_loss=None,
         max_steps: int = 1000,
@@ -322,6 +326,8 @@ class NHITS(BaseModel):
             **trainer_kwargs,
         )
 
+        self.last_block_activation = last_block_activation or activation
+
         # Architecture
         blocks = self.create_stack(
             h=h,
@@ -338,6 +344,7 @@ class NHITS(BaseModel):
             interpolation_mode=interpolation_mode,
             dropout_prob_theta=dropout_prob_theta,
             activation=activation,
+            last_block_activation=self.last_block_activation,
         )
         self.blocks = torch.nn.ModuleList(blocks)
 
@@ -345,7 +352,9 @@ class NHITS(BaseModel):
         self,
         h,
         input_size,
-        stack_types,
+        hist_input_size,
+        futr_input_size,
+        stat_input_size,
         n_blocks,
         mlp_units,
         n_pool_kernel_size,
@@ -354,14 +363,30 @@ class NHITS(BaseModel):
         interpolation_mode,
         dropout_prob_theta,
         activation,
-        futr_input_size,
-        hist_input_size,
-        stat_input_size,
+        last_block_activation,
+        stack_types,
     ):
 
-        block_list = []
+        nbeats_blocks = []
+
         for i in range(len(stack_types)):
+            blocks = []
+
             for block_id in range(n_blocks[i]):
+
+                # if basis == 'identity':
+                #     n_theta = [h, input_size]
+                # elif basis == 'seasonal':
+                #     n_theta = [4 * int(h / n_freq_downsample[i]) + 1,
+                #             4 * int(input_size / n_freq_downsample[i]) + 1]
+                # elif basis == 'trend':
+                #     n_theta = [int(h / n_freq_downsample[i]),
+                #             int(input_size / n_freq_downsample[i])]
+                # elif basis == 'fourier':
+                #     n_theta = [4 * int(h / n_freq_downsample[i]),
+                #             4 * int(input_size / n_freq_downsample[i])]
+                # else:
+                #     raise ValueError(f'Basis {basis} not supported.')
 
                 assert (
                     stack_types[i] == "identity"
@@ -377,6 +402,15 @@ class NHITS(BaseModel):
                     interpolation_mode=interpolation_mode,
                 )
 
+                # Apply Sigmoid only to the last block of the last stack
+                is_last_block = (i == len(stack_types) - 1) and (
+                    block_id == n_blocks[i] - 1
+                )
+                # Set activation function for the last block of the last stack
+                block_activation = (
+                    activation  # last_block_activation if is_last_block else activation
+                )
+
                 nbeats_block = NHITSBlock(
                     h=h,
                     input_size=input_size,
@@ -389,13 +423,57 @@ class NHITS(BaseModel):
                     pooling_mode=pooling_mode,
                     basis=basis,
                     dropout_prob=dropout_prob_theta,
-                    activation=activation,
+                    activation=block_activation,
                 )
 
-                # Select type of evaluation and apply it to all layers of block
-                block_list.append(nbeats_block)
+                blocks.append(nbeats_block)
 
-        return block_list
+            nbeats_blocks.append(torch.nn.ModuleList(blocks))
+
+        return nbeats_blocks
+
+    # def create_stack(self,
+    #                  h,
+    #                  input_size,
+    #                  stack_types,
+    #                  n_blocks,
+    #                  mlp_units,
+    #                  n_pool_kernel_size,
+    #                  n_freq_downsample,
+    #                  pooling_mode,
+    #                  interpolation_mode,
+    #                  dropout_prob_theta,
+    #                  activation,
+    #                  futr_input_size, hist_input_size, stat_input_size):
+
+    #     block_list = []
+    #     for i in range(len(stack_types)):
+    #         for block_id in range(n_blocks[i]):
+
+    #             assert stack_types[i] == 'identity', f'Block type {stack_types[i]} not found!'
+
+    #             n_theta = (input_size + self.loss.outputsize_multiplier*max(h//n_freq_downsample[i], 1) )
+    #             basis = _IdentityBasis(backcast_size=input_size, forecast_size=h,
+    #                                    out_features=self.loss.outputsize_multiplier,
+    #                                    interpolation_mode=interpolation_mode)
+
+    #             nbeats_block = NHITSBlock(h=h,
+    #                                       input_size=input_size,
+    #                                       futr_input_size=futr_input_size,
+    #                                       hist_input_size=hist_input_size,
+    #                                       stat_input_size=stat_input_size,
+    #                                       n_theta=n_theta,
+    #                                       mlp_units=mlp_units,
+    #                                       n_pool_kernel_size=n_pool_kernel_size[i],
+    #                                       pooling_mode=pooling_mode,
+    #                                       basis=basis,
+    #                                       dropout_prob=dropout_prob_theta,
+    #                                       activation=activation)
+
+    #             # Select type of evaluation and apply it to all layers of block
+    #             block_list.append(nbeats_block)
+
+    #     return block_list
 
     def forward(self, windows_batch):
 
